@@ -120,6 +120,9 @@ export interface RadarRow {
   implied_value_usd: number;
   growth_multiplier: number;
   maturity_multiplier: number;
+  family: Family;
+  why: string;
+  plan: FarmStep[];
 }
 
 /** A live-token protocol: it already trades, so the board shows the market's own value, not a model's. */
@@ -291,62 +294,164 @@ function holdDaysFor(age: number | null): number {
   return 30;
 }
 
-/** The category's one action, in the words a farmer can follow. */
-function actionFor(p: SnapshotProtocol, capital: number, chain: string): string {
-  const c = (p.category ?? '').toLowerCase();
-  const name = p.name;
-  if (c.includes('lend') || c.includes('cdp') || c.includes('collateral')) return `Supply $${capital} of USDC to ${name} on ${chain} and keep the position open.`;
-  if (c.includes('dex') || c.includes('yield') || c.includes('leveraged farm')) return `Provide $${capital} of liquidity to ${name}'s main pool on ${chain} and keep the position open.`;
-  if (c.includes('bridge')) return `Bridge $${capital} of USDC to ${chain} through ${name} and use the bridged funds in its app.`;
-  if (c.includes('staking') || c.includes('restak')) return `Stake $${capital} of the chain's staking asset through ${name} and keep the receipt.`;
-  if (c.includes('perpetual') || c.includes('derivative')) return `Deposit $${capital} of USDC as margin on ${name} and open one small hedge.`;
-  if (c.includes('prediction')) return `Fund $${capital} and place one market position on ${name}.`;
-  if (c.includes('curator') || c.includes('allocator')) return `Deposit $${capital} into a ${name} vault on ${chain} and keep the shares.`;
-  if (c.includes('stable')) return `Mint or deposit $${capital} of the stable asset through ${name} on ${chain}.`;
-  if (c.includes('rwa')) return `Mint $${capital} of the protocol's yield asset on ${chain} and hold it.`;
-  if (c.includes('insurance')) return `Buy $${capital} of cover from ${name} on ${chain} and keep the policy.`;
-  return `Deposit $${capital} of USDC into ${name} on ${chain} and keep the position open.`;
+/** The farm families the plans are written for: one per way a protocol rewards its users. */
+export type Family = 'curator' | 'lending' | 'cdp' | 'dex' | 'perps' | 'rwa' | 'staking' | 'bridge' | 'yield' | 'stable' | 'prediction' | 'insurance' | 'chain' | 'other';
+
+/** The family a category belongs to; matching is on the category string only, never on a name. */
+export function familyOf(category: string | null): Family {
+  const c = (category ?? '').toLowerCase();
+  if (c.includes('curator') || c.includes('allocator')) return 'curator';
+  if (c.includes('cdp') || c.includes('collateral')) return 'cdp';
+  if (c.includes('lend')) return 'lending';
+  if (c.includes('perp') || c.includes('derivative') || c.includes('options')) return 'perps';
+  if (c.includes('dex') || c.includes('liquidity manager') || c.includes('amm')) return 'dex';
+  if (c.includes('rwa') || c.includes('cedefi') || c.includes('payments') || c.includes('card')) return 'rwa';
+  if (c.includes('staking') || c.includes('restak')) return 'staking';
+  if (c.includes('bridge')) return 'bridge';
+  if (c.includes('basis') || c.includes('yield') || c.includes('farm') || c.includes('index') || c.includes('anchor') || c.includes('btc')) return 'yield';
+  if (c.includes('stable')) return 'stable';
+  if (c.includes('prediction')) return 'prediction';
+  if (c.includes('insurance')) return 'insurance';
+  if (c.includes('chain') || c.includes('governance')) return 'chain';
+  return 'other';
+}
+
+/** Two lines on why the family matters to a farmer: where the points come from and what to watch. */
+export function whyFor(p: SnapshotProtocol): string {
+  switch (familyOf(p.category)) {
+    case 'curator': return 'Curators earn fees on the vaults they run, so a token usually rewards early depositors by share-time held. TVL in the flagship vault is the number they will snapshot.';
+    case 'lending': return 'Lending markets reward both sides, so supplied and borrowed balances both count. Airdrops here usually weight time in the market, not trade count.';
+    case 'cdp': return 'Minting the protocol stablecoin is the action the team wants to grow. Debt outstanding and stablecoin held in its savings module are the usual point inputs.';
+    case 'dex': return 'Exchanges reward volume and in-range liquidity. Many sybil filters look at trade count and size spread, so a few real swaps beat hundreds of dust trades.';
+    case 'perps': return 'Derivatives venues pay for traded volume and open interest. Early seasons are thin, so small accounts often rank high per dollar traded.';
+    case 'rwa': return 'RWA issuers gate by KYC and region, which thins the farmer crowd. Holding the yield-bearing asset over several snapshots is the cleanest qualifier.';
+    case 'staking': return 'Liquid staking receipts only count if you hold them, so the airdrop follows the receipt token balance and any DeFi use of it on partner venues.';
+    case 'bridge': return 'Bridges reward unique routes and repeat transfers over months. One-way dust transfers are filtered; use the funds in the destination app too.';
+    case 'yield': return 'Yield and basis vaults reward deposit size and duration. The vault share token is the receipt, so keep it in the wallet you farmed with.';
+    case 'stable': return 'Stablecoin issuers reward minting, holding and use in partner venues. The holding period of the stable asset is typically the weighted input.';
+    case 'prediction': return 'Prediction markets reward active markets traded and volume. Resolved positions across several markets look more human than one big bet.';
+    case 'insurance': return 'Cover protocols are thin on users, so each buyer is a larger share of the pool. Active policies at snapshot time are the likely input.';
+    case 'chain': return 'Chain-level programs reward activity across its apps. Spread small actions over several native apps rather than one.';
+    default: return 'No clear points program is known for this category. Treat the plan as a low-cost position and watch the official channels before adding size.';
+  }
+}
+
+/** The family's own steps, between the shared wallet step and the shared hold and claim steps. */
+function familySteps(p: SnapshotProtocol, capital: number, chain: string): FarmStep[] {
+  const n = p.name;
+  const gas = capital >= 150 ? 8 : 4;
+  switch (familyOf(p.category)) {
+    case 'curator':
+      return [
+        { text: `Open ${n}'s app on ${chain} and pick its flagship vault, the one with the most deposits and a stablecoin base asset. Check the vault's curator and allocation page first.`, cost: `gas ($${gas}) + $${capital} deposit`, time: '20 minutes' },
+        { text: `Deposit $${capital} of the base asset and keep the vault shares in the same wallet. Do not unwrap or move them between wallets.`, cost: `$${capital} deposit`, time: '10 minutes' },
+        { text: `Add a second, smaller deposit into a different vault from ${n} so the wallet shows more than one position.`, cost: `$${Math.round(capital / 2)} + gas`, time: 'week 2' },
+      ];
+    case 'lending':
+      return [
+        { text: `Supply $${capital} of USDC to ${n} on ${chain} and enable it as collateral.`, cost: `$${capital} + $${gas} gas`, time: '15 minutes' },
+        { text: `Borrow a small amount, around 20% of the collateral value, in another stable asset, so both the supply and the borrow side are recorded. Stay far from liquidation.`, cost: 'interest of a few cents a week', time: '10 minutes' },
+        { text: `Repay and re-borrow once a month to log a second round of activity.`, cost: 'about $2 gas', time: 'monthly' },
+      ];
+    case 'cdp':
+      return [
+        { text: `Deposit $${capital * 2} of the accepted collateral on ${n} (${chain}) and check the collateral ratio before minting.`, cost: `$${capital * 2} collateral + $${gas} gas`, time: '20 minutes' },
+        { text: `Mint the protocol stablecoin at no more than 40% of the collateral value, keeping a wide margin over the liquidation ratio.`, cost: 'stability fee, a few cents a week', time: '10 minutes' },
+        { text: `Park the minted stablecoin in the protocol's savings or staking module if it has one, since that balance is often what is counted.`, cost: 'gas', time: '10 minutes' },
+      ];
+    case 'dex':
+      return [
+        { text: `Swap $${capital} between two major assets on ${n} (${chain}) a few times across different days. Vary the size a little.`, cost: `about 0.3% fee per swap + gas`, time: '15 minutes a session' },
+        { text: `Open a liquidity position of $${capital} in the highest-volume pool, a stable pair first to limit impermanent loss, and keep it in range.`, cost: `$${capital} + $${gas} gas`, time: '15 minutes' },
+        { text: `Check the position every week and rebalance only if it drifts out of range.`, cost: 'gas', time: '5 minutes a week' },
+      ];
+    case 'perps':
+      return [
+        { text: `If ${n} runs a testnet or a points beta, use it first and note which actions are scored. Then go to mainnet on ${chain}.`, cost: 'free on testnet', time: '1 hour' },
+        { text: `Deposit $${capital} of margin and trade at low leverage (2x or less). Aim for a few trades a week on liquid markets.`, cost: `$${capital} margin + fees`, time: '20 minutes a session' },
+        { text: `Open one hedged pair (long and short) to build volume with little price risk, and close it the same day.`, cost: 'trading fees, about 0.1% of volume', time: '10 minutes a week' },
+      ];
+    case 'rwa':
+      return [
+        { text: `Check ${n}'s site for a waitlist or KYC requirement and your region's eligibility. Join the waitlist with the farming wallet's address if it asks for one.`, cost: 'free', time: '1 day or more to approve' },
+        { text: `Complete KYC if required, using your own identity only. Never share a document through a link you were sent.`, cost: 'free, sometimes a fee', time: '1 to 3 days' },
+        { text: `Deposit $${capital * 2} or buy the minimum into the yield asset on ${chain} and hold it. Note the minimum and the redemption terms.`, cost: `$${capital * 2} + $${gas} gas`, time: '20 minutes' },
+      ];
+    case 'staking':
+      return [
+        { text: `Stake $${capital} of the staking asset through ${n} on ${chain} and receive the liquid receipt token.`, cost: `$${capital} + $${gas} gas`, time: '15 minutes' },
+        { text: `Use the receipt on one partner venue, as collateral or in a pool, and keep it there. Check that the partner is listed on ${n}'s own site.`, cost: `gas ($${gas})`, time: '20 minutes' },
+        { text: `Keep the receipt token unredeemed through the snapshot window; an unstake can cost the position its time weight.`, cost: 'none while held', time: 'ongoing' },
+      ];
+    case 'bridge':
+      return [
+        { text: `Bridge $${capital} of USDC or ETH to ${chain} through ${n}. Do it from a wallet with a few months of history if you can.`, cost: `bridge fee + about $${gas} gas`, time: '10 to 30 minutes' },
+        { text: `Use the bridged funds in an app on the destination chain, such as a swap or a deposit, so the transfer is not a dust hop.`, cost: `gas ($${gas})`, time: '15 minutes' },
+        { text: `Bridge back in a second transfer a week later, then repeat once a month on a different route.`, cost: 'bridge fee + gas', time: 'monthly' },
+      ];
+    case 'yield':
+      return [
+        { text: `Open ${n} on ${chain} and compare its vaults by TVL and strategy. Choose a stable-asset vault with audited contracts.`, cost: 'free', time: '20 minutes' },
+        { text: `Deposit $${capital} and keep the share token in the wallet.`, cost: `$${capital} + $${gas} gas`, time: '10 minutes' },
+        { text: `Add to the deposit once, a few weeks later. A steady balance with a top-up looks organic.`, cost: `$${Math.round(capital / 2)} + gas`, time: 'week 3' },
+      ];
+    case 'stable':
+      return [
+        { text: `Mint or buy $${capital} of ${n}'s stable asset on ${chain}, following its official mint page.`, cost: `$${capital} + $${gas} gas`, time: '15 minutes' },
+        { text: `Put the stable asset into its yield or savings module, or the largest pool that lists it.`, cost: `gas ($${gas})`, time: '15 minutes' },
+        { text: `Hold it through the snapshot window; do not swap it out and back in.`, cost: 'none', time: 'ongoing' },
+      ];
+    case 'prediction':
+      return [
+        { text: `Fund the wallet with $${capital} on ${n} and choose three liquid markets that resolve at different dates.`, cost: `$${capital} + $${gas} gas`, time: '20 minutes' },
+        { text: `Place a small position in each market, on both sides across different markets, and trade out of one early.`, cost: 'fees, about 1-2% of volume', time: '15 minutes' },
+        { text: `Return weekly to open one new market so the wallet shows steady use.`, cost: 'a few dollars', time: '10 minutes a week' },
+      ];
+    case 'insurance':
+      return [
+        { text: `Choose the cover product on ${n} (${chain}) that matches a protocol you already use.`, cost: 'free to browse', time: '10 minutes' },
+        { text: `Buy $${capital} of cover for the shortest period that counts and keep the policy token.`, cost: `premium (a few % a year) + gas`, time: '15 minutes' },
+        { text: `Renew once before the cover ends so there is more than one active period.`, cost: 'premium + gas', time: 'monthly' },
+      ];
+    case 'chain':
+      return [
+        { text: `Bridge $${capital} to ${chain} and use two or three of its native apps rather than one.`, cost: `bridge fee + $${gas} gas`, time: '30 minutes' },
+        { text: `Do one swap, one deposit and one governance vote or interaction on the chain, each on a different day.`, cost: 'a few dollars of gas', time: '15 minutes each' },
+        { text: `Check the chain's official page for a quest or points program and join it only through that link.`, cost: 'free', time: '10 minutes' },
+      ];
+    default:
+      return [
+        { text: `Deposit $${capital} of USDC into ${n} on ${chain} and keep the position open.`, cost: `$${capital} + about $${gas} gas`, time: '15 minutes' },
+        { text: `Use one more feature of the app, such as a swap, a vote or a stake, so the wallet shows more than a bare deposit.`, cost: 'a few dollars of gas', time: '15 minutes' },
+        { text: `Read ${n}'s official channels for any points program before adding more.`, cost: 'free', time: '10 minutes' },
+      ];
+  }
 }
 
 /**
- * A protocol's farm plan: six steps, each an action with a cost and a time. The plan is derived from
- * the protocol's own record (category, chains, TVL, age), never from a hand-written list of names.
+ * A protocol's farm plan: six to eight steps, each an action with a cost and a time. The plan is derived
+ * from the protocol's own record (category, chains, TVL, age), never from a hand-written list of names.
  */
 export function farmSteps(p: SnapshotProtocol, age: number | null): FarmStep[] {
   const chain = chainOf(p);
   const capital = capitalFor(p);
   const hold = holdDaysFor(age);
-  const action = actionFor(p, capital, chain);
   return [
     {
       text: `Use a fresh wallet that holds only the funds you plan to farm, and keep its seed phrase offline.`,
       cost: 'under $3 of gas for the first transaction',
       time: '5 minutes',
     },
-    {
-      text: action,
-      cost: `$${capital} of capital and about $${capital >= 150 ? 8 : 4} of gas`,
-      time: '15 minutes to set up',
-    },
-    {
-      text: `Make one qualifying action each week, such as a deposit, a borrow, a swap or a vote.`,
-      cost: 'about $2 of gas a week',
-      time: '10 minutes a week',
-    },
+    ...familySteps(p, capital, chain),
     {
       text: `Hold the position for at least ${hold} days so the activity is counted in more than one snapshot.`,
       cost: `the $${capital} stays in the position`,
       time: `${hold} days`,
     },
     {
-      text: `Before you withdraw, open the protocol's own points or rewards page and claim only from the link it publishes.`,
+      text: `Before you withdraw, open the protocol's own points or rewards page and claim only from the link it publishes. Never sign an unknown approval.`,
       cost: 'no fee to check, and never pay to claim',
       time: '10 minutes',
-    },
-    {
-      text: `Write the wallet, the dates and every transaction in a farm log so you can repeat the position or unwind it.`,
-      cost: 'nothing but the log',
-      time: '5 minutes',
     },
   ];
 }
@@ -384,6 +489,9 @@ export function radarRow(row: BoardRow): RadarRow {
     implied_value_usd: row.implied_value_usd,
     growth_multiplier: row.model.growth_multiplier,
     maturity_multiplier: row.model.maturity_multiplier,
+    family: familyOf(row.category),
+    why: whyFor(row as unknown as SnapshotProtocol),
+    plan: farmSteps(row as unknown as SnapshotProtocol, row.age_days),
   };
 }
 
